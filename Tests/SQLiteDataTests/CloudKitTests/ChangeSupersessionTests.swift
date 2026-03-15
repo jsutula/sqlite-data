@@ -273,7 +273,7 @@
                   parent: nil,
                   share: nil,
                   id: 1,
-                  id🗓️: 0,
+                  id🗓️: 1,
                   title: "Final",
                   title🗓️: 1,
                   🗓️: 1
@@ -334,10 +334,59 @@
                   parent: nil,
                   share: nil,
                   id: 1,
-                  id🗓️: 0,
+                  id🗓️: 2,
                   title: "Cycle2",
                   title🗓️: 2,
                   🗓️: 2
+                )
+              ]
+            ),
+            sharedCloudDatabase: MockCloudDatabase(
+              databaseScope: .shared,
+              storage: []
+            )
+          )
+          """
+        }
+      }
+      
+      @available(iOS 17, macOS 14, tvOS 17, watchOS 10, *)
+      @Test(.printTimestamps) func deleteAndReinsertWithSameValue_savesWithReinsertTimestamp()
+        async throws
+      {
+        try await userDatabase.userWrite { db in
+          try db.seed { RemindersList(id: 1, title: "Original") }
+        }
+        try await syncEngine.processPendingRecordZoneChanges(scope: .private)
+
+        try await withDependencies {
+          $0.currentTime.now = 1
+        } operation: {
+          try await userDatabase.userWrite { db in
+            try RemindersList.find(1).delete().execute(db)
+            try RemindersList.insert { RemindersList(id: 1, title: "Original") }.execute(db)
+          }
+          let pending = syncEngine.private.state.pendingRecordZoneChanges
+          #expect(pending == [.saveRecord(RemindersList.recordID(for: 1))])
+          try await syncEngine.processPendingRecordZoneChanges(scope: .private)
+        }
+
+        assertInlineSnapshot(of: container, as: .customDump) {
+          """
+          MockCloudContainer(
+            privateCloudDatabase: MockCloudDatabase(
+              databaseScope: .private,
+              storage: [
+                [0]: CKRecord(
+                  recordID: CKRecord.ID(1:remindersLists/zone/__defaultOwner__),
+                  recordType: "remindersLists",
+                  parent: nil,
+                  share: nil,
+                  id: 1,
+                  id🗓️: 1,
+                  title: "Original",
+                  title🗓️: 1,
+                  🗓️: 1
                 )
               ]
             ),
