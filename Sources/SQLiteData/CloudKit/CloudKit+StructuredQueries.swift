@@ -362,8 +362,6 @@
         return value.queryFragment
       } else if let value = self as? Data {
         return value.queryFragment
-      } else if let value = self as? [UInt8] {
-        return Data(value).queryFragment
       } else if let value = self as? Date {
         return value.queryFragment
       } else {
