@@ -188,6 +188,35 @@
       self.userModificationTime = userModificationTime
       return true
     }
+    
+    @discardableResult
+    package func setValue(
+      _ newValue: [UInt8],
+      forKey key: CKRecord.FieldKey,
+      at userModificationTime: Int64
+    ) -> Bool {
+      guard encryptedValues[at: key] <= userModificationTime
+      else { return false }
+
+      @Dependency(\.dataManager) var dataManager
+      let hash = newValue.sha256
+      let fileURL = dataManager.temporaryDirectory.appending(
+        component:
+          hash
+          .compactMap { String(format: "%02hhx", $0) }
+          .joined()
+      )
+      let asset = CKAsset(fileURL: fileURL)
+      return withErrorReporting(.sqliteDataCloudKitFailure) {
+        try dataManager.save(Data(newValue), to: fileURL)
+        self[key] = asset
+        encryptedValues[at: key] = userModificationTime
+        encryptedValues[hash: key] = hash
+        self.userModificationTime = userModificationTime
+        return true
+      }
+        ?? false
+    }
 
     @discardableResult
     package func setBytes(
@@ -252,7 +281,7 @@
           let value = Value(queryOutput: row[keyPath: keyPath])
           switch value.queryBinding {
           case .blob(let value):
-            setBytes(value, forKey: column.name, at: userModificationTime)
+            setValue(value, forKey: column.name, at: userModificationTime)
           case .bool(let value):
             setValue(value, forKey: column.name, at: userModificationTime)
           case .double(let value):
