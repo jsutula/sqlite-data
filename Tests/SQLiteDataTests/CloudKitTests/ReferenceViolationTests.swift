@@ -199,6 +199,7 @@
         }
         await modifications.notify()
         try await syncEngine.processPendingRecordZoneChanges(scope: .private)
+        try await syncEngine.retryPendingDownloads()
 
         assertInlineSnapshot(of: container, as: .customDump) {
           """

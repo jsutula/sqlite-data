@@ -7,6 +7,9 @@
   @available(iOS 17, macOS 14, tvOS 17, watchOS 10, *)
   package final class MockCloudDatabase: CloudDatabase {
     package let state = LockIsolated(State())
+    package let recordsOverride = LockIsolated<
+      (@Sendable ([CKRecord.ID]) async throws -> [CKRecord.ID: Result<CKRecord, any Error>])?
+    >(nil)
     package let databaseScope: CKDatabase.Scope
     let _container = IsolatedWeakVar<MockCloudContainer>()
     let dataManager = Dependency(\.dataManager)
@@ -72,6 +75,23 @@
     }
 
     package func records(
+      for ids: [CKRecord.ID],
+      desiredKeys: [CKRecord.FieldKey]?
+    ) async throws -> [CKRecord.ID: Result<CKRecord, any Error>] {
+      if let operation = recordsOverride.withValue({ $0 }) {
+        return try await operation(ids)
+      }
+      return try readRecords(for: ids, desiredKeys: desiredKeys)
+    }
+
+    package func records(
+      for ids: [CKRecord.ID],
+      desiredKeys: [CKRecord.FieldKey]?
+    ) throws -> [CKRecord.ID: Result<CKRecord, any Error>] {
+      try readRecords(for: ids, desiredKeys: desiredKeys)
+    }
+
+    package func readRecords(
       for ids: [CKRecord.ID],
       desiredKeys: [CKRecord.FieldKey]?
     ) throws -> [CKRecord.ID: Result<CKRecord, any Error>] {

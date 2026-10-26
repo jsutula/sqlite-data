@@ -360,6 +360,7 @@
             .fetchedRecordZoneChanges(modifications: [remindersListRecord], deletions: []),
             syncEngine: relaunchedSyncEngine.private
           )
+        try await relaunchedSyncEngine.retryPendingDownloads()
 
         assertQuery(
           SyncMetadata.order(by: \.recordName).select { ($0.recordName, $0.parentRecordName) },

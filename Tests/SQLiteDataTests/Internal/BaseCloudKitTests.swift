@@ -14,6 +14,7 @@
     .snapshots(record: .missing),
     .dependencies {
       $0.currentTime.now = 0
+      $0.date.now = Date(timeIntervalSince1970: 0)
       $0.continuousClock = TestClock<Duration>()
       $0.dataManager = InMemoryDataManager()
     },

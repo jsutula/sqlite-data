@@ -138,6 +138,16 @@
       )
       .execute(db)
     }
+    migrator.registerMigration("Deferred download retry deadline") { db in
+      try #sql("""
+        CREATE TABLE "sqlitedata_icloud_downloadRetry" (
+          "id" INTEGER PRIMARY KEY NOT NULL,
+          "retryAt" REAL,
+          "attempt" INTEGER NOT NULL DEFAULT 0
+        ) STRICT
+        """)
+        .execute(db)
+    }
     #if DEBUG
       try metadatabase.read { db in
         let hasSchemaChanges = try migrator.hasSchemaChanges(db)

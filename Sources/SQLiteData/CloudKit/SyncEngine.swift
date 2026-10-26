@@ -40,7 +40,12 @@
         -> (private: any SyncEngineProtocol, shared: any SyncEngineProtocol)
     package let container: any CloudContainer
     let dataManager = Dependency(\.dataManager)
-    private let observationRegistrar = ObservationRegistrar()
+    let observationRegistrar = ObservationRegistrar()
+    let pendingDownloadRecovery = PendingDownloadRecovery()
+    let pendingDownloadStatus = LockIsolated(PendingDownloadStatus())
+    let downloadClock = Dependency(\.continuousClock)
+    let downloadDate = Dependency(\.date)
+    let downloadJitter = Dependency(\.downloadRetryJitter)
     private let notificationsObserver = LockIsolated<(any NSObjectProtocol)?>(nil)
     private let activityCounts = LockIsolated(ActivityCounts())
     private let startTask = LockIsolated<Task<Void, Never>?>(nil)
@@ -429,6 +434,8 @@
     /// All edits made after stopping the sync engine will not be synchronized to CloudKit.
     /// You must start the sync engine again using ``start()`` to synchronize the changes.
     public func stop() {
+      pendingDownloadRecovery.cancel()
+      updatePendingDownloadStatus { $0.state = .stopped }
       guard isRunning else { return }
       #if DEBUG && canImport(DeveloperToolsSupport)
         previewTimerTask.withValue {
@@ -453,6 +460,7 @@
 
     private func start() throws -> Task<Void, Never> {
       guard !isRunning else { return Task {} }
+      pendingDownloadRecovery.enable()
       observationRegistrar.withMutation(of: self, keyPath: \.isRunning) {
         syncEngines.withValue {
           let (privateSyncEngine, sharedSyncEngine) = defaultSyncEngines(metadatabase, self)
@@ -544,6 +552,7 @@
             currentRecordTypeByTableName: currentRecordTypeByTableName
           )
           try await cacheUserTables(recordTypes: currentRecordTypes)
+          schedulePendingDownloadRecovery()
         }
       }
       self.startTask.withValue {
@@ -573,6 +582,11 @@
       async let `private`: Void = privateSyncEngine.fetchChanges(options)
       async let shared: Void = sharedSyncEngine.fetchChanges(options)
       _ = try await (`private`, shared)
+      try await retryPendingDownloads()
+    }
+
+    func startTaskForPendingDownloads() async {
+      await startTask.withValue(\.self)?.value
     }
 
     /// Sends pending local changes to the server.
@@ -1039,10 +1053,11 @@
         await MainActor.run {
           fetchingChangesCount += 1
         }
-      case .didFetchRecordZoneChanges:
+      case .didFetchRecordZoneChanges(_, let error):
         await MainActor.run {
           fetchingChangesCount -= 1
         }
+        await recordPendingDownloadThrottle(error)
 
       case .willFetchChanges:
         await MainActor.run {
@@ -1052,6 +1067,7 @@
         await MainActor.run {
           fetchingChangesCount -= 1
         }
+        schedulePendingDownloadRecovery()
 
       case .willSendChanges:
         await MainActor.run {
@@ -1351,12 +1367,16 @@
 
       switch changeType {
       case .signIn:
+        pendingDownloadRecovery.enable()
+        schedulePendingDownloadRecovery()
         syncEngine.state.add(pendingDatabaseChanges: [.saveZone(defaultZone)])
         await withErrorReporting {
           try await enqueueUnknownRecordsForCloudKit()
         }
         await delegate?.syncEngine(self, accountChanged: changeType)
       case .signOut, .switchAccounts:
+        pendingDownloadRecovery.cancel()
+        updatePendingDownloadStatus { $0.state = .stopped }
         guard let delegate
         else {
           await withErrorReporting(.sqliteDataCloudKitFailure) {
@@ -1528,59 +1548,7 @@
         }
       }
 
-      let unsyncedRecords =
-        await withErrorReporting(.sqliteDataCloudKitFailure) {
-          var unsyncedRecordIDs = try await userDatabase.write { db in
-            Set(
-              try UnsyncedRecordID.all
-                .fetchAll(db)
-                .map(CKRecord.ID.init(unsyncedRecordID:))
-            )
-          }
-          let modificationRecordIDs = Set(modifications.map(\.recordID))
-          let unsyncedRecordIDsToDelete = modificationRecordIDs.intersection(unsyncedRecordIDs)
-          unsyncedRecordIDs.subtract(modificationRecordIDs)
-          if !unsyncedRecordIDsToDelete.isEmpty {
-            try await userDatabase.write { db in
-              try UnsyncedRecordID
-                .findAll(unsyncedRecordIDsToDelete)
-                .delete()
-                .execute(db)
-            }
-          }
-          let batchSize = 150
-          let orderedUnsyncedRecordIDs = unsyncedRecordIDs.sorted {
-            topologicallyAscending(
-              lhsTableName: $0.tableName,
-              rhsTableName: $1.tableName,
-              rootFirst: true
-            )
-          }
-          var unsyncedRecords: [CKRecord] = []
-          for start in stride(from: 0, to: orderedUnsyncedRecordIDs.count, by: batchSize) {
-            let recordIDsBatch =
-              orderedUnsyncedRecordIDs
-              .dropFirst(start)
-              .prefix(batchSize)
-            let results = try await syncEngine.database.records(for: Array(recordIDsBatch))
-            for (recordID, result) in results {
-              switch result {
-              case .success(let record):
-                unsyncedRecords.append(record)
-              case .failure(let error as CKError) where error.code == .unknownItem:
-                try await userDatabase.write { db in
-                  try UnsyncedRecordID.find(recordID).delete().execute(db)
-                }
-              case .failure:
-                continue
-              }
-            }
-          }
-          return unsyncedRecords
-        }
-        ?? [CKRecord]()
-
-      let modifications = (modifications + unsyncedRecords).sorted { lhs, rhs in
+      let modifications = modifications.sorted { lhs, rhs in
         topologicallyAscending(
           lhsTableName: lhs.recordType,
           rhsTableName: rhs.recordType,
@@ -1631,9 +1599,10 @@
           }
         }
       }
+      await refreshPendingDownloadCount()
     }
 
-    private func topologicallyAscending(
+    func topologicallyAscending(
       lhsTableName: String?,
       rhsTableName: String?,
       rootFirst: Bool
@@ -1851,7 +1820,7 @@
         }
         ?? false
       if enqueuedUnsyncedRecordID {
-        await handleFetchedRecordZoneChanges(syncEngine: syncEngine)
+        schedulePendingDownloadRecovery()
       }
     }
 
@@ -1909,7 +1878,7 @@
       }
     }
 
-    private func upsertFromServerRecord(
+    func upsertFromServerRecord(
       _ serverRecord: CKRecord,
       force: Bool = false,
       db: Database

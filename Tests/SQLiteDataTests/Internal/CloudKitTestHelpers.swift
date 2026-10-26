@@ -86,7 +86,7 @@ extension SyncEngine {
         (try? result.get()) != nil ? recordID : nil
       }
       let freshRecords =
-        (try? syncEngine.database.records(
+        (try? syncEngine.database.readRecords(
           for: savedRecordIDs + deletedRecordIDs,
           desiredKeys: nil
         )) ?? [:]
@@ -103,6 +103,7 @@ extension SyncEngine {
         ),
         syncEngine: syncEngine
       )
+      try? await syncEngine.parentSyncEngine.retryPendingDownloads()
     }
   }
 }
